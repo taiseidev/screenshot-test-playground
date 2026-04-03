@@ -1,0 +1,65 @@
+name: Update Screenshot Baselines
+
+# mainにUIファイルの変更がマージされたら、外部リポジトリのベースラインを更新する
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/src/main/**/ui/**'
+      - 'app/src/main/**/theme/**'
+      - 'app/src/test/**/screenshot/**'
+      - '**/res/values/colors.xml'
+      - '**/res/layout/**'
+
+permissions:
+  contents: read
+
+jobs:
+  update-baselines:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Record screenshots
+        run: ./gradlew recordRoborazziDebug --parallel
+
+      - name: Push baselines to external repo
+        env:
+          GH_TOKEN: ${{ secrets.SCREENSHOT_REPO_TOKEN }}
+        run: |
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+          SCREENSHOT_REPO="taiseidev/screenshot-test-playground-screenshots"
+          BRANCH="base-${COMMIT_HASH}"
+
+          echo "Updating baselines for commit: ${COMMIT_HASH}"
+
+          # 既に存在する場合はスキップ
+          if gh api "repos/${SCREENSHOT_REPO}/branches/${BRANCH}" &>/dev/null; then
+            echo "Branch ${BRANCH} already exists, skipping"
+            exit 0
+          fi
+
+          # 外部リポジトリにpush
+          cd /tmp && rm -rf screenshot-push && mkdir screenshot-push && cd screenshot-push
+          git init
+          git -c user.name="github-actions[bot]" \
+              -c user.email="github-actions[bot]@users.noreply.github.com" \
+              checkout --orphan "${BRANCH}"
+          mkdir -p app/screenshots
+          cp ${GITHUB_WORKSPACE}/app/screenshots/*.png app/screenshots/
+          git add .
+          git -c user.name="github-actions[bot]" \
+              -c user.email="github-actions[bot]@users.noreply.github.com" \
+              commit -m "Baselines for ${COMMIT_HASH}"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${SCREENSHOT_REPO}.git"
+          git push origin "${BRANCH}"
+
+          echo "Pushed baselines to ${BRANCH}"
