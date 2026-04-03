@@ -9,7 +9,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
   id-token: write
 
@@ -43,16 +43,54 @@ jobs:
             app/build/outputs/roborazzi/*_actual.png
           if-no-files-found: ignore
 
+      - name: Push diff images to branch
+        if: always()
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          ROBO_DIR="app/build/outputs/roborazzi"
+          COMPARE_FILES=$(find "$ROBO_DIR" -name "*_compare.png" 2>/dev/null)
+
+          if [ -z "$COMPARE_FILES" ]; then
+            echo "差分画像なし — スキップ"
+            exit 0
+          fi
+
+          BRANCH="screenshot-diffs/pr-${PR_NUMBER}"
+
+          # orphanブランチを作成して画像をコミット
+          git checkout --orphan "$BRANCH"
+          git rm -rf --quiet . 2>/dev/null || true
+
+          mkdir -p screenshots
+          cp "$ROBO_DIR"/*_compare.png screenshots/ 2>/dev/null || true
+          cp "$ROBO_DIR"/*_actual.png screenshots/ 2>/dev/null || true
+
+          git add screenshots/
+          git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" \
+            commit -m "Screenshot diffs for PR #${PR_NUMBER}" --allow-empty
+
+          git push origin "$BRANCH" --force
+
+          # 元のブランチに戻る
+          git checkout -
+
       - name: Post Screenshot Report to PR
         if: always()
         uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         with:
           script: |
             const fs = require('fs');
             const path = require('path');
 
-            const prNumber = context.payload.pull_request.number;
+            const prNumber = process.env.PR_NUMBER;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
             const marker = '<!-- screenshot-diff-report -->';
+            const branch = `screenshot-diffs/pr-${prNumber}`;
+            const rawBase = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/screenshots`;
 
             // compare画像を探す
             const roboDir = 'app/build/outputs/roborazzi';
@@ -70,44 +108,44 @@ jobs:
             let body = marker + '\n## 📸 Screenshot Diff Report\n\n';
 
             for (const filePath of compareFiles.sort()) {
+              const fileName = path.basename(filePath);
               const testName = path.basename(filePath, '_compare.png');
-              const actualPath = filePath.replace('_compare.png', '_actual.png');
-              const hasActual = fs.existsSync(actualPath);
+              const actualFile = fileName.replace('_compare.png', '_actual.png');
+              const hasActual = fs.existsSync(path.join(roboDir, actualFile));
 
               body += `### ${testName}\n\n`;
 
               if (hasActual) {
-                body += '🔴 **差分あり** — ベースラインから変化が検出されました\n\n';
+                body += '🔴 **差分あり**\n\n';
               } else {
                 body += '🟢 **差分なし**\n\n';
               }
+
+              // compare画像を埋め込み（Reference | Diff | New の3列画像）
+              const imageUrl = `${rawBase}/${fileName}`;
+              body += `![${testName}](${imageUrl})\n\n`;
             }
 
-            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            body += `---\n📦 [差分画像の詳細を見る（Artifacts）](${runUrl})\n\n`;
+            body += '---\n';
             body += '🤖 AIレビューが続けて実行されます。\n';
 
-            // 既存コメントを探す
+            // 既存コメントを探して更新 or 新規作成
             const comments = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: prNumber,
+              owner, repo, issue_number: Number(prNumber),
             });
             const existing = comments.data.find(c => c.body && c.body.includes(marker));
 
             if (existing) {
               await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
+                owner, repo,
                 comment_id: existing.id,
-                body: body,
+                body,
               });
             } else {
               await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: prNumber,
-                body: body,
+                owner, repo,
+                issue_number: Number(prNumber),
+                body,
               });
             }
 
