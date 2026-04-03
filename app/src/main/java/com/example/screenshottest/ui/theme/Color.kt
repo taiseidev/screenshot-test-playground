@@ -3,7 +3,7 @@ package com.example.screenshottest.ui.theme
 import androidx.compose.ui.graphics.Color
 
 // プライマリカラー（デモ用：この色を変更して差分を確認する）
-val PrimaryLight = Color(0xFF1A51B7)
+val PrimaryLight = Color(0xFF2563EB)
 val OnPrimaryLight = Color(0xFFFFFFFF)
 val PrimaryContainerLight = Color(0xFFD8E2FF)
 
