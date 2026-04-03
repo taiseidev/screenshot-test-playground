@@ -14,7 +14,7 @@ permissions:
   id-token: write
 
 jobs:
-  # Step 1: スクリーンショット差分検出
+  # Step 1: スクリーンショット差分検出 + 結果をPRコメントに投稿
   screenshot-test:
     runs-on: ubuntu-latest
     steps:
@@ -33,13 +33,6 @@ jobs:
       - name: Compare Screenshots
         run: ./gradlew compareRoborazziDebug
 
-      - name: Check for diffs
-        id: check-diffs
-        run: |
-          DIFF_FILES=$(find app/build/outputs/roborazzi -name "*_compare.png" 2>/dev/null | wc -l | tr -d ' ')
-          echo "diff_count=$DIFF_FILES" >> "$GITHUB_OUTPUT"
-          echo "差分画像: ${DIFF_FILES}件"
-
       - name: Upload Screenshot Diffs
         if: always()
         uses: actions/upload-artifact@v4
@@ -50,8 +43,67 @@ jobs:
             app/build/outputs/roborazzi/*_actual.png
           if-no-files-found: ignore
 
-    outputs:
-      diff_count: ${{ steps.check-diffs.outputs.diff_count }}
+      - name: Post Screenshot Diff Comment
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          COMPARE_FILES=$(find app/build/outputs/roborazzi -name "*_compare.png" 2>/dev/null | sort)
+
+          if [ -z "$COMPARE_FILES" ]; then
+            echo "差分画像なし — コメント投稿をスキップ"
+            exit 0
+          fi
+
+          # コメント本文を組み立て
+          BODY="## 📸 Screenshot Diff Report"$'\n\n'
+
+          for FILE in $COMPARE_FILES; do
+            TEST_NAME=$(basename "$FILE" _compare.png)
+            BODY+="### ${TEST_NAME}"$'\n\n'
+
+            # 画像をGitHubにアップロードしてURLを取得
+            UPLOAD_URL=$(gh api \
+              --method POST \
+              -H "Accept: application/vnd.github+json" \
+              "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+              -f body="![${TEST_NAME}](uploading)" \
+              --jq '.id' 2>/dev/null || echo "")
+
+            # 代替: base64エンコードしてimgタグで埋め込む方法は使えないため、
+            # 差分の有無をテキストで報告し、詳細はArtifactへのリンクで案内
+            ACTUAL_FILE="app/build/outputs/roborazzi/${TEST_NAME}_actual.png"
+            if [ -f "$ACTUAL_FILE" ]; then
+              BODY+="🔴 **差分あり** — ベースラインから変化が検出されました"$'\n\n'
+            else
+              BODY+="🟢 **差分なし**"$'\n\n'
+            fi
+          done
+
+          # Artifactリンクを追加
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          BODY+="---"$'\n'
+          BODY+="📦 [差分画像をダウンロード](${RUN_URL}) (Artifacts → screenshot-diffs)"$'\n\n'
+          BODY+="🤖 AIレビューが続けて実行されます。"$'\n'
+
+          # 既存コメントを探して更新、なければ新規作成
+          EXISTING_COMMENT_ID=$(gh api \
+            "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+            --jq '.[] | select(.body | startswith("## 📸 Screenshot Diff Report")) | .id' \
+            2>/dev/null | head -1)
+
+          if [ -n "$EXISTING_COMMENT_ID" ]; then
+            gh api \
+              --method PATCH \
+              "repos/${{ github.repository }}/issues/comments/${EXISTING_COMMENT_ID}" \
+              -f body="$BODY"
+          else
+            gh api \
+              --method POST \
+              "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+              -f body="$BODY"
+          fi
 
   # Step 2: AIによる影響範囲分析 + 差分画像レビュー
   ai-review:
@@ -60,7 +112,6 @@ jobs:
     if: always()
     env:
       BASE_REF: ${{ github.base_ref }}
-      DIFF_COUNT: ${{ needs.screenshot-test.outputs.diff_count }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -87,25 +138,33 @@ jobs:
 
             ## Step 2: 差分画像の確認
             screenshot-diffs/ 配下に差分画像（*_compare.png）がある場合:
-            1. Readツールで各差分画像を読み取る
+            1. Readツールで各差分画像を読み取る（マルチモーダル）
             2. Reference（変更前）とNew（変更後）の違いを分析
             3. レイアウト崩れ、色のコントラスト問題がないか確認
 
+            差分画像がない場合は、コード変更のみから影響範囲を分析してください。
+
             ## Step 3: 判定とレポート
-            以下のフォーマットでPRコメントを作成:
+            以下のフォーマットでレポートを作成してください:
 
-            ### 影響範囲
-            | コンポーネント/画面 | 影響の理由 |
-            |---|---|
+            ## 🤖 AI UIレビュー結果
 
-            ### スクリーンショット差分
-            | テスト名 | 差分有無 | 判定 |
+            ### 影響範囲分析
+            | コンポーネント/画面 | 影響有無 | 理由 |
+            |---|---|---|
+
+            ### スクリーンショット差分分析
+            差分画像を読み取った場合、各画像について:
+            - 変更前後の違いの説明
+            - デザイン観点の評価（色、レイアウト、コントラスト等）
+
+            | テスト名 | 判定 | 詳細 |
             |---|---|---|
 
             判定基準:
-            - ✅ 意図した変更
-            - ⚠️ 要確認（コントラスト、アクセシビリティ等）
-            - ❌ レグレッション
+            - ✅ 意図した変更（問題なし）
+            - ⚠️ 要確認（コントラスト、アクセシビリティ等の懸念）
+            - ❌ レグレッション（意図しない変更）
 
             ### 総合判定
-            差分画像がない場合は「UI変更は検出されませんでした」と報告してください。
+            変更全体の安全性を評価し、マージ可否の推奨を記載してください。
