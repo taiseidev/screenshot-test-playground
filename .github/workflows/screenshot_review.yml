@@ -50,14 +50,17 @@ jobs:
           script: |
             const fs = require('fs');
             const path = require('path');
-            const glob = require('@actions/glob');
 
             const prNumber = context.payload.pull_request.number;
             const marker = '<!-- screenshot-diff-report -->';
 
             // compare画像を探す
-            const globber = await glob.create('app/build/outputs/roborazzi/*_compare.png');
-            const compareFiles = await globber.glob();
+            const roboDir = 'app/build/outputs/roborazzi';
+            const compareFiles = fs.existsSync(roboDir)
+              ? fs.readdirSync(roboDir)
+                  .filter(f => f.endsWith('_compare.png'))
+                  .map(f => path.join(roboDir, f))
+              : [];
 
             if (compareFiles.length === 0) {
               console.log('差分画像なし');
@@ -68,22 +71,13 @@ jobs:
 
             for (const filePath of compareFiles.sort()) {
               const testName = path.basename(filePath, '_compare.png');
-
-              // 画像をGitHubにアップロード
-              const imageData = fs.readFileSync(filePath);
-              const base64 = imageData.toString('base64');
-              const dataUri = `data:image/png;base64,${base64}`;
-
-              // GitHub issue comment用に画像をアップロード
-              // まずダミーissueコメントで画像をアップロードし、URLを取得する代わりに
-              // compare画像をbase64でdetailsタグ内に埋め込む
               const actualPath = filePath.replace('_compare.png', '_actual.png');
               const hasActual = fs.existsSync(actualPath);
 
               body += `### ${testName}\n\n`;
 
               if (hasActual) {
-                body += '🔴 **差分あり**\n\n';
+                body += '🔴 **差分あり** — ベースラインから変化が検出されました\n\n';
               } else {
                 body += '🟢 **差分なし**\n\n';
               }
