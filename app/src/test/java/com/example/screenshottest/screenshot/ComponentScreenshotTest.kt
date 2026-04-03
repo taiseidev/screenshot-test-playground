@@ -12,6 +12,7 @@ import com.github.takahirom.roborazzi.captureRoboImage
 import com.example.screenshottest.ui.components.AppTopBar
 import com.example.screenshottest.ui.components.LoginScreen
 import com.example.screenshottest.ui.components.PrimaryButton
+import com.example.screenshottest.ui.components.ProfileScreen
 import com.example.screenshottest.ui.components.SampleScreen
 import com.example.screenshottest.ui.components.SettingsScreen
 import com.example.screenshottest.ui.components.SimpleDialog
@@ -214,6 +215,32 @@ class ComponentScreenshotTest {
         }
         composeTestRule.onRoot().captureRoboImage(
             filePath = "screenshots/LoginScreen_dark.png",
+        )
+    }
+
+    // --- ProfileScreen（新規画面: TopAppBar + PrimaryButton） ---
+
+    @Test
+    fun profileScreen_light() {
+        composeTestRule.setContent {
+            AppTheme(isDark = false) {
+                ProfileScreen()
+            }
+        }
+        composeTestRule.onRoot().captureRoboImage(
+            filePath = "screenshots/ProfileScreen_light.png",
+        )
+    }
+
+    @Test
+    fun profileScreen_dark() {
+        composeTestRule.setContent {
+            AppTheme(isDark = true) {
+                ProfileScreen()
+            }
+        }
+        composeTestRule.onRoot().captureRoboImage(
+            filePath = "screenshots/ProfileScreen_dark.png",
         )
     }
 }
