@@ -14,12 +14,9 @@ permissions:
   id-token: write
 
 jobs:
-  # Step 1: スクリーンショット差分検出 + 画像をブランチにpush
+  # Step 1: スクリーンショット差分検出 + 画像をGitHub CDNにアップロード
   screenshot-test:
     runs-on: ubuntu-latest
-    outputs:
-      has_diffs: ${{ steps.push-images.outputs.has_diffs }}
-      image_branch: ${{ steps.push-images.outputs.image_branch }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,6 +33,52 @@ jobs:
       - name: Compare Screenshots
         run: ./gradlew compareRoborazziDebug
 
+      - name: Setup CML
+        if: always()
+        uses: iterative/setup-cml@v3
+
+      - name: Upload images and save URLs
+        id: upload-images
+        if: always()
+        env:
+          REPO_TOKEN: ${{ github.token }}
+        run: |
+          ROBO_DIR="app/build/outputs/roborazzi"
+          COMPARE_FILES=$(find "$ROBO_DIR" -name "*_compare.png" 2>/dev/null | sort)
+
+          if [ -z "$COMPARE_FILES" ]; then
+            echo "差分画像なし"
+            echo "has_diffs=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "has_diffs=true" >> "$GITHUB_OUTPUT"
+
+          # 各画像をGitHub CDNにアップロードしてURL一覧を作成
+          mkdir -p /tmp/screenshot-urls
+          IMAGE_MAP=""
+
+          for FILE in $COMPARE_FILES; do
+            FILENAME=$(basename "$FILE")
+            TEST_NAME=$(basename "$FILE" _compare.png)
+
+            # cml publishでCDNにアップロード → URLが返る
+            CDN_URL=$(cml publish "$FILE")
+            IMAGE_MAP="${IMAGE_MAP}${TEST_NAME}|${CDN_URL}\n"
+            echo "${TEST_NAME}: ${CDN_URL}"
+          done
+
+          # URL一覧をファイルに保存（AI jobで参照）
+          printf "$IMAGE_MAP" > /tmp/screenshot-urls/image_urls.txt
+
+      - name: Upload URL mapping
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshot-urls
+          path: /tmp/screenshot-urls/image_urls.txt
+          if-no-files-found: ignore
+
       - name: Upload Screenshot Diffs
         if: always()
         uses: actions/upload-artifact@v4
@@ -46,40 +89,6 @@ jobs:
             app/build/outputs/roborazzi/*_actual.png
           if-no-files-found: ignore
 
-      - name: Push diff images to branch
-        id: push-images
-        if: always()
-        env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          ROBO_DIR="app/build/outputs/roborazzi"
-          COMPARE_COUNT=$(find "$ROBO_DIR" -name "*_compare.png" 2>/dev/null | wc -l | tr -d ' ')
-          BRANCH="screenshot-diffs/pr-${PR_NUMBER}"
-
-          echo "image_branch=$BRANCH" >> "$GITHUB_OUTPUT"
-
-          if [ "$COMPARE_COUNT" -eq 0 ]; then
-            echo "差分画像なし"
-            echo "has_diffs=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "has_diffs=true" >> "$GITHUB_OUTPUT"
-
-          # orphanブランチに画像をpush
-          git checkout --orphan "$BRANCH"
-          git rm -rf --quiet . 2>/dev/null || true
-
-          mkdir -p screenshots
-          cp "$ROBO_DIR"/*_compare.png screenshots/ 2>/dev/null || true
-          cp "$ROBO_DIR"/*_actual.png screenshots/ 2>/dev/null || true
-
-          git add screenshots/
-          git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" \
-            commit -m "Screenshot diffs for PR #${PR_NUMBER}"
-
-          git push origin "$BRANCH" --force
-
   # Step 2: AIが影響分析 + 画像読み取り + デザインレビューを統合レポートとして投稿
   ai-review:
     runs-on: ubuntu-latest
@@ -87,8 +96,6 @@ jobs:
     if: always()
     env:
       BASE_REF: ${{ github.base_ref }}
-      HAS_DIFFS: ${{ needs.screenshot-test.outputs.has_diffs }}
-      IMAGE_BRANCH: ${{ needs.screenshot-test.outputs.image_branch }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -100,19 +107,23 @@ jobs:
           path: screenshot-diffs/
         continue-on-error: true
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: screenshot-urls
+          path: screenshot-urls/
+        continue-on-error: true
+
       - name: AI Screenshot Review
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
-            あなたはUI変更のレビュー専門家です。このPRのUI変更について、影響範囲分析・スクリーンショット差分のデザインレビュー・テストカバレッジの確認を行い、1つの統合レポートをPRコメントとして投稿してください。
+            あなたはUI変更のレビュー専門家です。このPRのUI変更について、影響範囲分析・スクリーンショット差分のデザインレビュー・テストカバレッジの確認を行い、1つの統合レポートを作成してください。
 
             ## 環境情報
             - ベースブランチ: 環境変数 BASE_REF を参照
-            - スクリーンショット差分の有無: 環境変数 HAS_DIFFS を参照
-            - 差分画像ブランチ: 環境変数 IMAGE_BRANCH を参照
-            - リポジトリ: ${{ github.repository }}
-            - 差分画像のURL形式: https://raw.githubusercontent.com/${{ github.repository }}/{IMAGE_BRANCH}/screenshots/{ファイル名}
+            - 差分画像: screenshot-diffs/ 配下の *_compare.png
+            - 画像CDN URL一覧: screenshot-urls/image_urls.txt（形式: テスト名|CDN_URL）
 
             ## Step 1: コード変更の把握
             1. git diff でベースブランチとの変更ファイル・変更内容を確認
@@ -124,25 +135,25 @@ jobs:
             2. そのコンポーネントを使っている画面をさらにGrepで探す
             3. 類似のコンポーネントも確認し、「影響しない」場合はその根拠を説明する
 
-            **重要**: 「影響あり」だけでなく「影響なし」の根拠も示すこと。例えば「PrimaryButtonはMaterialTheme.colorScheme.primary経由で色を取得しているため影響ありだが、TopAppBarはsurface色を使っているため影響なし」のように。
+            **重要**: 「影響あり」だけでなく「影響なし」の根拠も示すこと。
 
             ## Step 3: 差分画像のデザインレビュー
             screenshot-diffs/ 配下に差分画像（*_compare.png）がある場合:
             1. Readツールで各差分画像を読み取る（マルチモーダル対応）
-            2. 変更前後の違いを具体的に分析（色の変化、レイアウトの変化等）
-            3. デザイン観点で評価:
-               - コントラスト比は十分か（WCAG基準）
-               - レイアウト崩れはないか
-               - 意図した変更と一致しているか
-               - ダークテーマでの問題はないか
+            2. 変更前後の違いを具体的に分析
+            3. デザイン観点で評価（コントラスト比、レイアウト崩れ、ダークテーマ等）
 
             ## Step 4: テストカバレッジの確認
-            1. app/src/test/ 配下のスクリーンショットテストファイルを確認
-            2. 影響を受けるコンポーネント/画面のうち、スクリーンショットテストがないものを特定
-            3. テスト未カバーの画面は「手動確認が必要」として警告
+            1. app/src/test/ 配下のスクリーンショットテストを確認
+            2. 影響を受けるのにテストがないコンポーネント/画面を特定
 
             ## Step 5: レポート出力
-            以下のフォーマットでレポートを作成してください。
+            以下のフォーマットで出力してください。
+
+            **重要: 画像の埋め込み方法**
+            screenshot-urls/image_urls.txt を読み取り、各テスト名に対応するCDN URLを取得してください。
+            レポート内では `![テスト名](CDN_URL)` の形式で画像を埋め込んでください。
+            これによりPRコメント上で画像が直接表示されます。
 
             ---
 
@@ -156,22 +167,20 @@ jobs:
             #### ⭕ 影響あり
             | コンポーネント/画面 | 影響の理由 | テストカバレッジ |
             |---|---|---|
-            （影響を受けるコンポーネント/画面を列挙。テストカバレッジは「✅ スクショテストあり」「❌ テストなし（手動確認必要）」）
+            （テストカバレッジは「✅ スクショテストあり」「❌ テストなし（手動確認必要）」）
 
             #### ➖ 影響なし
             | コンポーネント/画面 | 影響なしの根拠 |
             |---|---|
-            （影響を受けないコンポーネント/画面と、なぜ影響しないかの根拠）
 
             ### スクリーンショット差分
-            差分画像がある場合、各テストについて:
+            各テストについて以下を記載:
 
             #### {テスト名}
             **判定**: ✅ / ⚠️ / ❌
             **分析**: （変更前後の違いの説明、デザイン観点の評価）
 
-            （ここに差分画像を埋め込む。画像URLは環境変数 IMAGE_BRANCH を使って以下の形式で:）
-            ![テスト名](https://raw.githubusercontent.com/${{ github.repository }}/{IMAGE_BRANCH}/screenshots/{ファイル名})
+            ![テスト名](CDN_URL)
 
             判定基準:
             - ✅ 意図した変更（問題なし）
@@ -179,8 +188,8 @@ jobs:
             - ❌ レグレッション（意図しない変更）
 
             ### 手動確認が必要な画面
-            スクリーンショットテストが未導入で、影響を受ける可能性がある画面をリストアップ。
-            ない場合は「すべての影響画面がスクリーンショットテストでカバーされています」と記載。
+            テスト未カバーで影響を受ける画面のリスト。
+            ない場合は「すべての影響画面がテストでカバーされています」と記載。
 
             ### 総合判定
-            変更全体の安全性を評価し、マージ可否の推奨を記載。
+            変更全体の安全性とマージ可否の推奨。
