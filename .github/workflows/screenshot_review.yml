@@ -14,9 +14,12 @@ permissions:
   id-token: write
 
 jobs:
-  # Step 1: スクリーンショット差分検出 + 画像付きPRコメント投稿
+  # Step 1: スクリーンショット差分検出 + 画像をブランチにpush
   screenshot-test:
     runs-on: ubuntu-latest
+    outputs:
+      has_diffs: ${{ steps.push-images.outputs.has_diffs }}
+      image_branch: ${{ steps.push-images.outputs.image_branch }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,21 +47,26 @@ jobs:
           if-no-files-found: ignore
 
       - name: Push diff images to branch
+        id: push-images
         if: always()
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           ROBO_DIR="app/build/outputs/roborazzi"
-          COMPARE_FILES=$(find "$ROBO_DIR" -name "*_compare.png" 2>/dev/null)
+          COMPARE_COUNT=$(find "$ROBO_DIR" -name "*_compare.png" 2>/dev/null | wc -l | tr -d ' ')
+          BRANCH="screenshot-diffs/pr-${PR_NUMBER}"
 
-          if [ -z "$COMPARE_FILES" ]; then
-            echo "差分画像なし — スキップ"
+          echo "image_branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+          if [ "$COMPARE_COUNT" -eq 0 ]; then
+            echo "差分画像なし"
+            echo "has_diffs=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          BRANCH="screenshot-diffs/pr-${PR_NUMBER}"
+          echo "has_diffs=true" >> "$GITHUB_OUTPUT"
 
-          # orphanブランチを作成して画像をコミット
+          # orphanブランチに画像をpush
           git checkout --orphan "$BRANCH"
           git rm -rf --quiet . 2>/dev/null || true
 
@@ -68,94 +76,20 @@ jobs:
 
           git add screenshots/
           git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" \
-            commit -m "Screenshot diffs for PR #${PR_NUMBER}" --allow-empty
+            commit -m "Screenshot diffs for PR #${PR_NUMBER}"
 
           git push origin "$BRANCH" --force
-
-          # 元のブランチに戻る
           git checkout -
 
-      - name: Post Screenshot Report to PR
-        if: always()
-        uses: actions/github-script@v7
-        env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        with:
-          script: |
-            const fs = require('fs');
-            const path = require('path');
-
-            const prNumber = process.env.PR_NUMBER;
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const marker = '<!-- screenshot-diff-report -->';
-            const branch = `screenshot-diffs/pr-${prNumber}`;
-            const rawBase = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/screenshots`;
-
-            // compare画像を探す
-            const roboDir = 'app/build/outputs/roborazzi';
-            const compareFiles = fs.existsSync(roboDir)
-              ? fs.readdirSync(roboDir)
-                  .filter(f => f.endsWith('_compare.png'))
-                  .map(f => path.join(roboDir, f))
-              : [];
-
-            if (compareFiles.length === 0) {
-              console.log('差分画像なし');
-              return;
-            }
-
-            let body = marker + '\n## 📸 Screenshot Diff Report\n\n';
-
-            for (const filePath of compareFiles.sort()) {
-              const fileName = path.basename(filePath);
-              const testName = path.basename(filePath, '_compare.png');
-              const actualFile = fileName.replace('_compare.png', '_actual.png');
-              const hasActual = fs.existsSync(path.join(roboDir, actualFile));
-
-              body += `### ${testName}\n\n`;
-
-              if (hasActual) {
-                body += '🔴 **差分あり**\n\n';
-              } else {
-                body += '🟢 **差分なし**\n\n';
-              }
-
-              // compare画像を埋め込み（Reference | Diff | New の3列画像）
-              const imageUrl = `${rawBase}/${fileName}`;
-              body += `![${testName}](${imageUrl})\n\n`;
-            }
-
-            body += '---\n';
-            body += '🤖 AIレビューが続けて実行されます。\n';
-
-            // 既存コメントを探して更新 or 新規作成
-            const comments = await github.rest.issues.listComments({
-              owner, repo, issue_number: Number(prNumber),
-            });
-            const existing = comments.data.find(c => c.body && c.body.includes(marker));
-
-            if (existing) {
-              await github.rest.issues.updateComment({
-                owner, repo,
-                comment_id: existing.id,
-                body,
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner, repo,
-                issue_number: Number(prNumber),
-                body,
-              });
-            }
-
-  # Step 2: AIによる影響範囲分析 + 差分画像レビュー
+  # Step 2: AIが影響分析 + 画像読み取り + デザインレビューを統合レポートとして投稿
   ai-review:
     runs-on: ubuntu-latest
     needs: screenshot-test
     if: always()
     env:
       BASE_REF: ${{ github.base_ref }}
+      HAS_DIFFS: ${{ needs.screenshot-test.outputs.has_diffs }}
+      IMAGE_BRANCH: ${{ needs.screenshot-test.outputs.image_branch }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -172,43 +106,82 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
-            このPRのUI変更をレビューしてください。以下のステップで実行してください。
+            あなたはUI変更のレビュー専門家です。このPRのUI変更について、影響範囲分析・スクリーンショット差分のデザインレビュー・テストカバレッジの確認を行い、1つの統合レポートをPRコメントとして投稿してください。
 
-            ## Step 1: 影響範囲分析
-            1. git diff で変更ファイルを確認（ベースブランチは環境変数 BASE_REF を参照）
-            2. 変更内容を読み取り、何が変わったかを把握
-            3. Grepで依存を辿り、影響する画面を特定
-            4. 影響しない画面とその理由も明記
+            ## 環境情報
+            - ベースブランチ: 環境変数 BASE_REF を参照
+            - スクリーンショット差分の有無: 環境変数 HAS_DIFFS を参照
+            - 差分画像ブランチ: 環境変数 IMAGE_BRANCH を参照
+            - リポジトリ: ${{ github.repository }}
+            - 差分画像のURL形式: https://raw.githubusercontent.com/${{ github.repository }}/{IMAGE_BRANCH}/screenshots/{ファイル名}
 
-            ## Step 2: 差分画像の確認
+            ## Step 1: コード変更の把握
+            1. git diff でベースブランチとの変更ファイル・変更内容を確認
+            2. 何が変わったのか（色、レイアウト、コンポーネント等）を正確に把握
+
+            ## Step 2: 影響範囲の網羅的な特定
+            変更されたコードから依存関係を辿り、影響するコンポーネント・画面を特定してください。
+            1. 変更されたファイルを直接参照しているコンポーネントをGrepで探す
+            2. そのコンポーネントを使っている画面をさらにGrepで探す
+            3. 類似のコンポーネントも確認し、「影響しない」場合はその根拠を説明する
+
+            **重要**: 「影響あり」だけでなく「影響なし」の根拠も示すこと。例えば「PrimaryButtonはMaterialTheme.colorScheme.primary経由で色を取得しているため影響ありだが、TopAppBarはsurface色を使っているため影響なし」のように。
+
+            ## Step 3: 差分画像のデザインレビュー
             screenshot-diffs/ 配下に差分画像（*_compare.png）がある場合:
-            1. Readツールで各差分画像を読み取る（マルチモーダル）
-            2. Reference（変更前）とNew（変更後）の違いを分析
-            3. レイアウト崩れ、色のコントラスト問題がないか確認
+            1. Readツールで各差分画像を読み取る（マルチモーダル対応）
+            2. 変更前後の違いを具体的に分析（色の変化、レイアウトの変化等）
+            3. デザイン観点で評価:
+               - コントラスト比は十分か（WCAG基準）
+               - レイアウト崩れはないか
+               - 意図した変更と一致しているか
+               - ダークテーマでの問題はないか
 
-            差分画像がない場合は、コード変更のみから影響範囲を分析してください。
+            ## Step 4: テストカバレッジの確認
+            1. app/src/test/ 配下のスクリーンショットテストファイルを確認
+            2. 影響を受けるコンポーネント/画面のうち、スクリーンショットテストがないものを特定
+            3. テスト未カバーの画面は「手動確認が必要」として警告
 
-            ## Step 3: 判定とレポート
-            以下のフォーマットでレポートを作成してください:
+            ## Step 5: レポート出力
+            以下のフォーマットでレポートを作成してください。
 
-            ## 🤖 AI UIレビュー結果
+            ---
+
+            ## 🤖 AI駆動UIレビュー
+
+            ### 変更概要
+            （何がどう変わったかを1-2行で説明）
 
             ### 影響範囲分析
-            | コンポーネント/画面 | 影響有無 | 理由 |
-            |---|---|---|
 
-            ### スクリーンショット差分分析
-            差分画像を読み取った場合、各画像について:
-            - 変更前後の違いの説明
-            - デザイン観点の評価（色、レイアウト、コントラスト等）
-
-            | テスト名 | 判定 | 詳細 |
+            #### ⭕ 影響あり
+            | コンポーネント/画面 | 影響の理由 | テストカバレッジ |
             |---|---|---|
+            （影響を受けるコンポーネント/画面を列挙。テストカバレッジは「✅ スクショテストあり」「❌ テストなし（手動確認必要）」）
+
+            #### ➖ 影響なし
+            | コンポーネント/画面 | 影響なしの根拠 |
+            |---|---|
+            （影響を受けないコンポーネント/画面と、なぜ影響しないかの根拠）
+
+            ### スクリーンショット差分
+            差分画像がある場合、各テストについて:
+
+            #### {テスト名}
+            **判定**: ✅ / ⚠️ / ❌
+            **分析**: （変更前後の違いの説明、デザイン観点の評価）
+
+            （ここに差分画像を埋め込む。画像URLは環境変数 IMAGE_BRANCH を使って以下の形式で:）
+            ![テスト名](https://raw.githubusercontent.com/${{ github.repository }}/{IMAGE_BRANCH}/screenshots/{ファイル名})
 
             判定基準:
             - ✅ 意図した変更（問題なし）
-            - ⚠️ 要確認（コントラスト、アクセシビリティ等の懸念）
+            - ⚠️ 要確認（コントラスト、アクセシビリティ等の懸念あり）
             - ❌ レグレッション（意図しない変更）
 
+            ### 手動確認が必要な画面
+            スクリーンショットテストが未導入で、影響を受ける可能性がある画面をリストアップ。
+            ない場合は「すべての影響画面がスクリーンショットテストでカバーされています」と記載。
+
             ### 総合判定
-            変更全体の安全性を評価し、マージ可否の推奨を記載してください。
+            変更全体の安全性を評価し、マージ可否の推奨を記載。
