@@ -1,0 +1,118 @@
+name: AI Screenshot Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: screenshot-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # Step 1: スクリーンショット差分検出
+  screenshot-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Compare Screenshots
+        run: ./gradlew compareRoborazziDebug
+
+      - name: Check for diffs
+        id: check-diffs
+        run: |
+          DIFF_FILES=$(find app/build/outputs/roborazzi -name "*_compare.png" 2>/dev/null | wc -l | tr -d ' ')
+          echo "diff_count=$DIFF_FILES" >> "$GITHUB_OUTPUT"
+          echo "差分画像: ${DIFF_FILES}件"
+
+      - name: Upload Screenshot Diffs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshot-diffs
+          path: |
+            app/build/outputs/roborazzi/*_compare.png
+            app/build/outputs/roborazzi/*_actual.png
+          if-no-files-found: ignore
+
+    outputs:
+      diff_count: ${{ steps.check-diffs.outputs.diff_count }}
+
+  # Step 2: AIによる影響範囲分析 + 差分画像レビュー
+  ai-review:
+    runs-on: ubuntu-latest
+    needs: screenshot-test
+    if: always()
+    env:
+      BASE_REF: ${{ github.base_ref }}
+      DIFF_COUNT: ${{ needs.screenshot-test.outputs.diff_count }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: screenshot-diffs
+          path: screenshot-diffs/
+        continue-on-error: true
+
+      - name: Build AI Review Prompt
+        id: build-prompt
+        run: |
+          cat <<'PROMPT_EOF' > /tmp/ai-prompt.txt
+          このPRのUI変更をレビューしてください。以下のステップで実行してください。
+
+          ## Step 1: 影響範囲分析
+          1. git diff で変更ファイルを確認（ベースブランチは環境変数 BASE_REF を参照）
+          2. 変更内容を読み取り、何が変わったかを把握
+          3. Grepで依存を辿り、影響する画面を特定
+          4. 影響しない画面とその理由も明記
+
+          ## Step 2: 差分画像の確認
+          screenshot-diffs/ 配下に差分画像（*_compare.png）がある場合:
+          1. Readツールで各差分画像を読み取る
+          2. Reference（変更前）とNew（変更後）の違いを分析
+          3. レイアウト崩れ、色のコントラスト問題がないか確認
+
+          ## Step 3: 判定とレポート
+          以下のフォーマットでPRコメントを作成:
+
+          ### 影響範囲
+          | コンポーネント/画面 | 影響の理由 |
+          |---|---|
+
+          ### スクリーンショット差分
+          | テスト名 | 差分有無 | 判定 |
+          |---|---|---|
+
+          判定基準:
+          - ✅ 意図した変更
+          - ⚠️ 要確認（コントラスト、アクセシビリティ等）
+          - ❌ レグレッション
+
+          ### 総合判定
+          差分画像がない場合は「UI変更は検出されませんでした」と報告してください。
+          PROMPT_EOF
+          echo "prompt_file=/tmp/ai-prompt.txt" >> "$GITHUB_OUTPUT"
+
+      - name: AI Screenshot Review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          model: claude-sonnet-4-20250514
+          prompt_file: /tmp/ai-prompt.txt
