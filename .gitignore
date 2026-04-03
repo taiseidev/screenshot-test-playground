@@ -9,6 +9,7 @@
 .externalNativeBuild
 .cxx
 local.properties
-# スクリーンショットのベースラインはGit管理する（差分画像は除外）
+# スクリーンショット（ベースラインは外部リポジトリで管理）
+app/screenshots/*.png
 *_compare.png
 *_actual.png

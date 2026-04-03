@@ -37,6 +37,45 @@ jobs:
       - name: Setup CML
         uses: iterative/setup-cml@v3
 
+      - name: Fetch base screenshots
+        env:
+          GH_TOKEN: ${{ secrets.SCREENSHOT_REPO_TOKEN }}
+        run: |
+          BASE_HASH=$(git rev-parse --short "origin/${{ github.base_ref }}")
+          SCREENSHOT_REPO="taiseidev/screenshot-test-playground-screenshots"
+          BRANCH="base-${BASE_HASH}"
+
+          echo "Base hash: ${BASE_HASH}, Branch: ${BRANCH}"
+
+          if gh api "repos/${SCREENSHOT_REPO}/branches/${BRANCH}" &>/dev/null; then
+            echo "Base images found, downloading..."
+            git clone --branch "${BRANCH}" --depth 1 \
+              "https://x-access-token:${GH_TOKEN}@github.com/${SCREENSHOT_REPO}.git" \
+              /tmp/base-screenshots
+            cp /tmp/base-screenshots/app/screenshots/*.png app/screenshots/
+            echo "Copied $(ls app/screenshots/*.png | wc -l) baseline images"
+          else
+            echo "Base images not found for ${BRANCH}"
+            echo "Generating base images..."
+            CURRENT_BRANCH=$(git branch --show-current)
+            git checkout "origin/${{ github.base_ref }}"
+            ./gradlew recordRoborazziDebug --parallel
+            # Push to external repo
+            cd /tmp && rm -rf screenshot-push && mkdir screenshot-push && cd screenshot-push
+            git init
+            git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" \
+              checkout --orphan "${BRANCH}"
+            mkdir -p app/screenshots
+            cp /Users/runner/work/screenshot-test-playground/screenshot-test-playground/app/screenshots/*.png app/screenshots/
+            git add .
+            git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" \
+              commit -m "Baselines for ${BASE_HASH}"
+            git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${SCREENSHOT_REPO}.git"
+            git push origin "${BRANCH}"
+            cd /Users/runner/work/screenshot-test-playground/screenshot-test-playground
+            git checkout "${CURRENT_BRANCH}" 2>/dev/null || git checkout -
+          fi
+
       - name: AI Screenshot Review
         uses: anthropics/claude-code-action@v1
         with:
@@ -45,5 +84,6 @@ jobs:
           prompt: |
             /review-ui を実行してください。
             CI環境です。環境変数 REPO_TOKEN が利用可能です。
+            ベースライン画像は app/screenshots/ に配置済みです。
         env:
           REPO_TOKEN: ${{ github.token }}

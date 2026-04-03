@@ -271,4 +271,15 @@ CDN_URL=$(cml publish "画像パス")
 ls app/screenshots/*.png 2>/dev/null | head -20
 ```
 
-ベースラインが存在しない場合は `./gradlew recordRoborazziDebug` で撮影し、その旨をレポートに記載する。
+ベースライン画像は外部リポジトリ（taiseidev/screenshot-test-playground-screenshots）で管理している。
+CI環境では「Fetch base screenshots」ステップで自動的に `app/screenshots/` に配置される。
+ローカル環境でベースラインがない場合は以下で取得する:
+
+```bash
+BASE_HASH=$(git rev-parse --short origin/main)
+git clone --branch "base-${BASE_HASH}" --depth 1 \
+  https://github.com/taiseidev/screenshot-test-playground-screenshots.git /tmp/base-screenshots
+cp /tmp/base-screenshots/app/screenshots/*.png app/screenshots/
+```
+
+それでもベースラインがない場合（初回）は `./gradlew recordRoborazziDebug` で撮影し、外部リポジトリにpushする。
