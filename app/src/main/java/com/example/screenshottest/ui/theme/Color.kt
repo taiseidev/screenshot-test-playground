@@ -12,7 +12,7 @@ val OnPrimaryDark = Color(0xFF002E69)
 val PrimaryContainerDark = Color(0xFF00429A)
 
 // サーフェス
-val SurfaceLight = Color(0xFFFEFBFF)
+val SurfaceLight = Color(0xFFF0F4FF)
 val OnSurfaceLight = Color(0xFF1B1B1F)
 
 val SurfaceDark = Color(0xFF1B1B1F)
