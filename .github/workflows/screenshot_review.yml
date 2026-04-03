@@ -57,7 +57,7 @@ jobs:
           else
             echo "Base images not found for ${BRANCH}"
             echo "Generating base images..."
-            CURRENT_BRANCH=$(git branch --show-current)
+            WORK_DIR=$(pwd)
             git checkout "origin/${{ github.base_ref }}"
             ./gradlew recordRoborazziDebug --parallel
             # Push to external repo
@@ -66,14 +66,14 @@ jobs:
             git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" \
               checkout --orphan "${BRANCH}"
             mkdir -p app/screenshots
-            cp /Users/runner/work/screenshot-test-playground/screenshot-test-playground/app/screenshots/*.png app/screenshots/
+            cp "${WORK_DIR}"/app/screenshots/*.png app/screenshots/
             git add .
             git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" \
               commit -m "Baselines for ${BASE_HASH}"
             git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${SCREENSHOT_REPO}.git"
             git push origin "${BRANCH}"
-            cd /Users/runner/work/screenshot-test-playground/screenshot-test-playground
-            git checkout "${CURRENT_BRANCH}" 2>/dev/null || git checkout -
+            cd "${WORK_DIR}"
+            git checkout - 2>/dev/null || true
           fi
 
       - name: AI Screenshot Review
