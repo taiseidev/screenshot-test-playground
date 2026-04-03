@@ -79,7 +79,6 @@ jobs:
             commit -m "Screenshot diffs for PR #${PR_NUMBER}"
 
           git push origin "$BRANCH" --force
-          git checkout -
 
   # Step 2: AIが影響分析 + 画像読み取り + デザインレビューを統合レポートとして投稿
   ai-review:
