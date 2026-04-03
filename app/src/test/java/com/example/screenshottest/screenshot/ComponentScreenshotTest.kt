@@ -10,8 +10,10 @@ import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.unit.dp
 import com.github.takahirom.roborazzi.captureRoboImage
 import com.example.screenshottest.ui.components.AppTopBar
+import com.example.screenshottest.ui.components.LoginScreen
 import com.example.screenshottest.ui.components.PrimaryButton
 import com.example.screenshottest.ui.components.SampleScreen
+import com.example.screenshottest.ui.components.SettingsScreen
 import com.example.screenshottest.ui.components.SimpleDialog
 import com.example.screenshottest.ui.theme.AppTheme
 import org.junit.Rule
@@ -137,7 +139,7 @@ class ComponentScreenshotTest {
         )
     }
 
-    // --- SampleScreen（統合テスト） ---
+    // --- SampleScreen（統合テスト: TopAppBar + PrimaryButton） ---
 
     @Test
     fun sampleScreen_light() {
@@ -160,6 +162,58 @@ class ComponentScreenshotTest {
         }
         composeTestRule.onRoot().captureRoboImage(
             filePath = "screenshots/SampleScreen_dark.png",
+        )
+    }
+
+    // --- SettingsScreen（TopAppBarのみ使用） ---
+
+    @Test
+    fun settingsScreen_light() {
+        composeTestRule.setContent {
+            AppTheme(isDark = false) {
+                SettingsScreen()
+            }
+        }
+        composeTestRule.onRoot().captureRoboImage(
+            filePath = "screenshots/SettingsScreen_light.png",
+        )
+    }
+
+    @Test
+    fun settingsScreen_dark() {
+        composeTestRule.setContent {
+            AppTheme(isDark = true) {
+                SettingsScreen()
+            }
+        }
+        composeTestRule.onRoot().captureRoboImage(
+            filePath = "screenshots/SettingsScreen_dark.png",
+        )
+    }
+
+    // --- LoginScreen（PrimaryButtonのみ使用） ---
+
+    @Test
+    fun loginScreen_light() {
+        composeTestRule.setContent {
+            AppTheme(isDark = false) {
+                LoginScreen()
+            }
+        }
+        composeTestRule.onRoot().captureRoboImage(
+            filePath = "screenshots/LoginScreen_light.png",
+        )
+    }
+
+    @Test
+    fun loginScreen_dark() {
+        composeTestRule.setContent {
+            AppTheme(isDark = true) {
+                LoginScreen()
+            }
+        }
+        composeTestRule.onRoot().captureRoboImage(
+            filePath = "screenshots/LoginScreen_dark.png",
         )
     }
 }
